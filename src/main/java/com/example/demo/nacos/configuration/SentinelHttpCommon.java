@@ -55,16 +55,31 @@ public abstract class SentinelHttpCommon {
             consoleHost = dashboardList.get(0).r1;
             consolePort = dashboardList.get(0).r2;
             RecordLog.info("[NettyHttpHeartbeatSender] Dashboard address parsed: <" + consoleHost + ':' + consolePort + ">");
+            sendLoginRequestWithRetry(3);
         }
-        sendLoginRequest();
+    }
+
+    private static void sendLoginRequestWithRetry(int retryCount) {
+        RetryWrap retryWrap = new RetryWrap(retryCount) {
+            @Override
+            protected boolean doing() {
+                return sendLoginRequest();
+            }
+
+            @Override
+            protected void afterFailure() {
+                //do nothing
+            }
+        };
+        retryWrap.run();
     }
 
     private static boolean sendLoginRequest() {
         URIBuilder uriBuilder = new URIBuilder();
         uriBuilder.setScheme("http").setHost(consoleHost).setPort(consolePort)
-                .setPath("/auth/login")
-                .setParameter("username", "sentinel")
-                .setParameter("password", "sentinel");
+                    .setPath("/auth/login")
+                    .setParameter("username", "sentinel")
+                    .setParameter("password", "sentinel");
         HttpPost request;
         try {
             request = new HttpPost(uriBuilder.build());

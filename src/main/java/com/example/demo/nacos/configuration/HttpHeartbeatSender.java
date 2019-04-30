@@ -27,13 +27,17 @@ import com.alibaba.fastjson.JSON;
 import com.alibaba.fastjson.JSONObject;
 import com.alibaba.nacos.api.PropertyKeyConst;
 import com.example.demo.nacos.enums.ConfigChangeType;
+import org.apache.http.StatusLine;
 import org.apache.http.client.methods.CloseableHttpResponse;
 import org.apache.http.client.methods.HttpGet;
 import org.apache.http.client.utils.URIBuilder;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.io.IOException;
+import java.net.URISyntaxException;
 import java.util.Properties;
+import java.util.concurrent.TimeUnit;
 
 /**
  * @author Eric Zhao
@@ -45,21 +49,42 @@ public class HttpHeartbeatSender extends SentinelHttpCommon implements Heartbeat
     private static final Logger logger = LoggerFactory.getLogger(HttpHeartbeatSender.class);
 
     public HttpHeartbeatSender() {
+        init();
+    }
+
+    private void init() {
         logger.info("[HttpHeartbeatSender] Sending first heartbeat to {}:{}", consoleHost, consolePort);
-        try {
-            sendHeartbeat();
-            for (ConfigChangeType changeType : ConfigChangeType.values()) {
-                // TODO need to retry the failed send?
-                SentinelConfigChangeSender.sendChangeRequest(changeType, SentinelConfigConstant.CLIENT_INIT_OPERATOR);
-            }
-        } catch (Exception e) {
-            logger.error("[HttpHeartbeatSender] Sending first heartbeat error:{}", e);
+        sendHeartbeatWithRetry(5);
+        for (ConfigChangeType changeType : ConfigChangeType.values()) {
+            // default retry three times,if always failure,will send four times
+            SentinelConfigChangeSender.sendChangeRequestWithRetry(changeType, SentinelConfigConstant.CLIENT_INIT_OPERATOR);
         }
     }
 
+    private void sendHeartbeatWithRetry(int retryCount) {
+        RetryWrap retryWrap = new RetryWrap(retryCount) {
+            @Override
+            protected boolean doing() {
+                return sendHeartbeat();
+            }
+
+            @Override
+            protected void afterFailure() {
+                try {
+                    TimeUnit.MILLISECONDS.sleep(50);
+                } catch (InterruptedException e) {
+                    logger.error("Thread fail to sleep and will start the next retry");
+                }
+            }
+        };
+        retryWrap.run();
+    }
+
     @Override
-    public boolean sendHeartbeat() throws Exception {
-        if (StringUtil.isEmpty(consoleHost)) {
+    public boolean sendHeartbeat() {
+        //Since HttpServer startup is asynchronous and sending useless ports to dashboard is unnecessary,
+        // the sending condition add TransportConfig. getRuntimePort () < 0.
+        if (StringUtil.isEmpty(consoleHost) || TransportConfig.getRuntimePort() < 0) {
             return false;
         }
         URIBuilder uriBuilder = new URIBuilder();
@@ -68,11 +93,19 @@ public class HttpHeartbeatSender extends SentinelHttpCommon implements Heartbeat
                     .setParameter("v", Constants.SENTINEL_VERSION)
                     .setParameter("info", generateParam());
 
-        HttpGet request = new HttpGet(uriBuilder.build());
-        // Send heartbeat request.
-        CloseableHttpResponse response = execute(request);
-        response.close();
-        return true;
+        HttpGet request;
+        int statusCode;
+        try {
+            request = new HttpGet(uriBuilder.build());
+            CloseableHttpResponse response = execute(request);
+            StatusLine statusLine = response.getStatusLine();
+            statusCode = statusLine.getStatusCode();
+            response.close();
+        } catch (URISyntaxException | IOException e) {
+            logger.error("Error when sendChangeRequest, {}", e);
+            return false;
+        }
+        return statusCode == 200;
     }
 
     private String generateParam() {
@@ -83,7 +116,7 @@ public class HttpHeartbeatSender extends SentinelHttpCommon implements Heartbeat
         jsonObject.put("version", String.valueOf(System.currentTimeMillis()));
         jsonObject.put("hostname", HostNameUtil.getHostName());
         jsonObject.put("ip", TransportConfig.getHeartbeatClientIp());
-        jsonObject.put("port", TransportConfig.getPort());
+        jsonObject.put("port", TransportConfig.getRuntimePort());
         jsonObject.put("pid", String.valueOf(PidUtil.getPid()));
         jsonObject.put("degradeRulesKey", RulesKeyUtils.getDegradeRulesKey());
         jsonObject.put("flowRulesKey", RulesKeyUtils.getFlowRulesKey());
